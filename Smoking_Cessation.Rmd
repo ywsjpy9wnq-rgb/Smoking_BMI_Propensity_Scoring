@@ -1,7 +1,6 @@
 ---
 title: 'Smoking cessation model'
 output: html_document
-date: '2026-04-17'
 ---
 ```{r}
 library(tidyverse)
