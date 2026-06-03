@@ -1,0 +1,138 @@
+---
+title: 'Smoking cessation model'
+output: html_document
+date: '2026-04-17'
+---
+```{r}
+library(tidyverse)
+library(readxl)
+library(broom)
+library(gtsummary)
+library(WeightIt)
+library(survey)
+
+```
+
+
+```{r}
+#Load DS
+smokers_DS <- read_excel('smokers_2026.xlsx')
+smokers_DS
+```
+
+```{r}
+#Convert binary vars into factors with labels
+smokers_DS <- smokers_DS %>%
+  mutate(
+    sex = factor(sex, levels = c(0, 1), labels = c('Female', 'Male')), #Convert 0/1 to Female/Male
+    smoking_cessation = factor(smoking_cessation, levels = c(0, 1),
+                               labels = c('No', 'Yes')), #Convert 0/1 to No/Yes
+    CVD = factor(CVD, levels = c(0, 1), labels = c('No', 'Yes')), #Convert 0/1 to No/Yes
+    dementia = factor(dementia, levels = c(0, 1), labels = c('No', 'Yes')), #Convert 0/1 to No/Yes
+    diuretics = factor(diuretics, levels = c(0, 1), labels = c('No', 'Yes')), #Convert 0/1 to No/Yes
+  )
+```
+
+```{r}
+#Check missing data by counting NA
+sum(is.na(smokers_DS))
+smokers_DS
+```
+
+```{r}
+#Descriptive statistics table
+smokers_DS %>%
+  dplyr::select(bmi_ch_percent, smoking_cessation, age, sex, n_cigarettes, bmi, CVD, dementia, diuretics) %>%
+  tbl_summary(
+    by = smoking_cessation,
+    statistic = list(all_continuous() ~ '{mean} ({sd})',
+                     all_categorical() ~ '{n} ({p}%)'),
+    digits = all_continuous() ~ 1
+  ) %>%
+add_p() 
+```
+
+
+```{r}
+#Outcome regression models to estimate association - unadjusted / adjusted
+unadjusted <- lm(bmi_ch_percent ~ smoking_cessation, data = smokers_DS)
+tidy(unadjusted, conf.int = TRUE)
+
+adjusted <- lm(bmi_ch_percent ~ smoking_cessation + age + sex + n_cigarettes + bmi + CVD + dementia + diuretics, data = smokers_DS)
+tidy(adjusted, conf.int = TRUE) %>% filter(term == 'smoking_cessationYes')
+```
+
+```{r}
+#Calculate propensity score / IPW weight calculation:
+prop_score <- glm(smoking_cessation ~ age + sex + n_cigarettes + bmi + CVD + dementia + diuretics,
+                  data = smokers_DS, family = binomial(link = 'logit')) #Estimate propensity score
+
+
+smokers_DS <- smokers_DS %>% #Calculate IPW weights
+  mutate(
+    PS = predict(prop_score, type = 'response'),
+    ipw_weight = case_when(
+      smoking_cessation == 'Yes' ~ 1/PS,
+      smoking_cessation == 'No' ~ 1/(1 - PS)
+    )
+  )
+
+#Check weight distributions
+summary(smokers_DS$ipw_weight)
+```
+
+
+```{r}
+#IPW weighted outcome model to estimate avg treatment effect
+design <- svydesign(ids = ~1, data = smokers_DS, weights = ~ipw_weight)
+model_ipw <- svyglm(bmi_ch_percent ~ smoking_cessation, design = design)
+
+tidy(model_ipw, conf.int = TRUE)
+```
+
+```{r}
+#Sensitivity analysis - IPW weights with tuncated weights
+p99 <- quantile(smokers_DS$ipw_weight, 0.99) #Caps weight at 99 percent
+smokers_DS <- smokers_DS %>%
+  mutate(ipw_weight_trunc = pmin(ipw_weight, p99))
+
+#Check truncated weight distributions
+summary(smokers_DS$ipw_weight_trunc)
+```
+
+
+```{r}
+#IPW truncated weighted model - Refit weighted regression using truncated weights
+design_trunc <- svydesign(ids = ~1, data = smokers_DS, weights = ~ipw_weight_trunc)
+model_ipw_trunc <- svyglm(bmi_ch_percent ~ smoking_cessation, design = design_trunc)
+tidy(model_ipw_trunc, conf.int = TRUE)
+
+```
+
+```{r}
+#Propensity score overalap - Probability of quitting across range
+ggplot(smokers_DS, aes(x = PS, fill = smoking_cessation)) +
+  geom_density(alpha = 0.5) +
+  labs(title = 'Propensity Score Distribution by Smoking Cessation',
+       x = 'Probability of quitting', fill = 'Quit') +
+  theme_minimal()
+```
+```{r}
+#Effect estimates - Extract for each modelling approach
+#Sample sizes by group
+smokers_DS %>% count(smoking_cessation)
+
+#Unadjusted model
+tidy(unadjusted, conf.int = TRUE)
+
+# Adjusted model (filtered for cessation effect)
+tidy(adjusted, conf.int = TRUE) %>% filter(term == 'smoking_cessationYes')
+
+# IPW untruncated
+tidy(model_ipw, conf.int = TRUE)
+
+# IPW truncated
+tidy(model_ipw_trunc, conf.int = TRUE)
+```
+
+
